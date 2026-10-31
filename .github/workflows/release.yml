@@ -1,0 +1,24 @@
+name: Prepare reviewed release artifact
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: node scripts/init-env.mjs
+      - run: npm ci --ignore-scripts && npm run generate && npm run build
+      - name: Package compiled code only (no environment files or credentials)
+        run: tar -czf foundation-build.tgz apps/api/dist apps/web/.next apps/web/package.json apps/web/next.config.ts package.json package-lock.json prisma prisma.config.ts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: foundation-build
+          path: foundation-build.tgz
+          retention-days: 7
+# Deliberately no cloud login, deployment target, paid service, or production execution.

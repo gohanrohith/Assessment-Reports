@@ -1,0 +1,128 @@
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: #f2f5f3;
+  color: #17362d;
+  font-family: Arial, sans-serif;
+  line-height: 1.6;
+}
+main {
+  max-width: 920px;
+  margin: 48px auto;
+  padding: 0 24px;
+}
+header {
+  padding: 24px 0;
+}
+h1 {
+  font-size: 2.4rem;
+  line-height: 1.2;
+  max-width: 700px;
+}
+h2 {
+  margin-top: 0;
+}
+.eyebrow {
+  font-size: 0.8rem;
+  letter-spacing: 0.18em;
+  font-weight: bold;
+  color: #397b62;
+}
+section {
+  background: #fff;
+  padding: 32px;
+  border: 1px solid #ccdad2;
+  border-radius: 12px;
+  margin: 24px 0;
+}
+form {
+  max-width: 560px;
+}
+label {
+  display: block;
+  font-weight: 600;
+  margin: 16px 0;
+}
+input,
+select,
+textarea {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #769383;
+  border-radius: 6px;
+  font: inherit;
+  background: #fff;
+  color: #17362d;
+}
+button {
+  background: #1b5943;
+  color: #fff;
+  border: 1px solid #1b5943;
+  border-radius: 6px;
+  padding: 12px 20px;
+  font: inherit;
+  cursor: pointer;
+  margin: 8px 12px 8px 0;
+}
+.secondary {
+  background: #fff;
+  color: #1b5943;
+}
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+input:focus-visible,
+button:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid #c58a1b;
+  outline-offset: 3px;
+}
+nav {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+}
+nav label {
+  flex: 1;
+}
+fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.error {
+  color: #9e2525;
+  background: #ffeded;
+  padding: 16px;
+}
+.secret {
+  display: block;
+  overflow-wrap: anywhere;
+  background: #f2f5f3;
+  padding: 12px;
+}
+footer {
+  padding: 24px 0;
+  color: #526b60;
+  font-size: 0.9rem;
+}
+@media (max-width: 600px) {
+  main {
+    margin: 16px auto;
+  }
+  h1 {
+    font-size: 1.9rem;
+  }
+  section {
+    padding: 20px;
+  }
+  nav {
+    display: block;
+  }
+}

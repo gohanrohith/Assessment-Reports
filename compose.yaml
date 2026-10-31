@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5
+    environment:
+      POSTGRES_USER: assessment_owner
+      POSTGRES_PASSWORD: local_owner_only
+      POSTGRES_DB: assessment
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - assessment_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assessment_owner -d assessment"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  assessment_db:

@@ -1,0 +1,96 @@
+generator client {
+  provider = "prisma-client-js"
+  engineType = "client"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+  directUrl = env("MIGRATION_DATABASE_URL")
+}
+enum Role {
+  PLATFORM_ADMIN
+  SCHOOL_ADMIN
+  PRINCIPAL
+  CLASS_TEACHER
+  SUBJECT_TEACHER
+  STUDENT
+  GUARDIAN
+  REVIEWER
+}
+model User {
+  id String @id @default(uuid()) @db.Uuid
+  email String @unique
+  passwordHash String
+  platformAdmin Boolean @default(false)
+  mfaSecret String?
+  mfaEnabled Boolean @default(false)
+  lastTotpStep BigInt @default(-1)
+  createdAt DateTime @default(now())
+  memberships Membership[]
+  sessions Session[]
+}
+model School {
+  id String @id @default(uuid()) @db.Uuid @map("tenant_id")
+  legalName String
+  displayName String
+  locale String @default("en-IN")
+  timezone String @default("Asia/Kolkata")
+  academicYear String
+  board String
+  country String @default("IN")
+  state String
+  address String
+  contactEmail String
+  logoUrl String?
+  campuses Json @default("[]")
+  status String @default("ACTIVE")
+  createdAt DateTime @default(now())
+  memberships Membership[]
+  @@index([id])
+}
+model Membership {
+  id String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid @map("tenant_id")
+  userId String @db.Uuid
+  role Role
+  active Boolean @default(true)
+  school School @relation(fields:[tenantId],references:[id])
+  user User @relation(fields:[userId],references:[id])
+  @@unique([tenantId,userId])
+  @@index([tenantId])
+  @@index([userId])
+}
+model Session {
+  id String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+  activeSchoolId String? @db.Uuid
+  refreshHash String @unique
+  expiresAt DateTime
+  revoked Boolean @default(false)
+  mfaVerified Boolean @default(false)
+  version Int @default(0)
+  user User @relation(fields:[userId],references:[id])
+  createdAt DateTime @default(now())
+  @@index([userId])
+}
+model RefreshUse {
+  hash String @id
+  sessionId String @db.Uuid
+  expiresAt DateTime
+}
+model AuditEvent {
+  id String @id @default(uuid()) @db.Uuid
+  tenantId String? @db.Uuid @map("tenant_id")
+  actorId String? @db.Uuid
+  action String
+  targetId String?
+  correlationId String
+  details Json @default("{}")
+  createdAt DateTime @default(now())
+  @@index([tenantId,createdAt])
+}
+model RateBucket {
+  key String @id
+  hits Int @default(1)
+  resetsAt DateTime
+}

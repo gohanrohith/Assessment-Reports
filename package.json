@@ -1,0 +1,57 @@
+{
+  "name": "assessment-passport",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "scripts": {
+    "dev": "concurrently -k \"npm run dev -w @assessment/api\" \"npm run dev -w @assessment/web\"",
+    "generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
+    "db:seed": "tsx scripts/seed.ts",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit -p tsconfig.tools.json && npm run typecheck --workspaces --if-present",
+    "test": "npm run test -w @assessment/api",
+    "test:e2e": "playwright test",
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run lint && npm run format:check && npm run typecheck && npm run test:migrations && npm test && npm run build",
+    "user:create": "tsx scripts/create-user.ts",
+    "maintenance": "tsx scripts/maintenance.ts",
+    "format:check": "prettier --check apps packages scripts tests prisma.config.ts playwright.config.ts eslint.config.mjs",
+    "test:migrations": "tsx scripts/validate-migrations.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@playwright/test": "^1.56.1",
+    "@sparticuz/chromium": "^153.0.0",
+    "@types/node": "^24.10.0",
+    "@types/pg": "^8.23.1",
+    "concurrently": "^9.2.1",
+    "eslint": "^9.39.0",
+    "prisma": "6.19.3",
+    "tsx": "^4.20.6",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "prettier": "^3.6.2"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^6.19.3",
+    "@prisma/client": "6.19.3",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.2.3",
+    "otpauth": "^9.4.1",
+    "pg": "^8.23.1"
+  },
+  "overrides": {
+    "deepmerge-ts": "8.0.2",
+    "multer": "2.5.0",
+    "@nestjs/swagger": {
+      "js-yaml": "^5.4.1"
+    }
+  }
+}
