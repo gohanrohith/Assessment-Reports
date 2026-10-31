@@ -1,6 +1,6 @@
 # School Assessment + Academic Passport
 
-Foundation milestone: a Next.js school workspace and a NestJS identity/tenant API with PostgreSQL, Prisma, forced row-level security, TOTP MFA, scoped sessions and audit. No ERP modules, assessment engine or production deployment.
+Foundation milestone: a Next.js school workspace and a NestJS identity/tenant API with PostgreSQL, Prisma, forced row-level security, TOTP MFA, scoped sessions, staff access management and audit. No ERP modules, assessment engine or production deployment.
 
 ## Local development
 
@@ -33,6 +33,8 @@ npm audit --audit-level=high
 npm run maintenance    # remove expired throttle buckets and spent refresh-token hashes
 ```
 
-Run tests only against disposable local databases. Tests insert synthetic fixtures and preserve audit records. CI provisions a fresh PostgreSQL service. Browser tests start and stop their own built web/API servers; stop `npm run dev` first. Chromium comes from the integrity-locked `@sparticuz/chromium` package; Linux shared libraries are needed (CI installs standard Playwright system dependencies). To review intentional UI changes: `npm run test:e2e -- --update-snapshots`; inspect the changed PNG before committing.
+Run tests only against disposable local databases. Tests insert synthetic fixtures and preserve audit records. CI provisions a fresh PostgreSQL service. Browser tests start and stop their own built web/API servers; stop `npm run dev` first. PDF regression testing additionally requires Poppler (`pdftoppm`, normally installed as `poppler-utils`). Chromium comes from the integrity-locked `@sparticuz/chromium` package; Linux shared libraries are needed (CI installs standard Playwright system dependencies). To review intentional UI changes: `npm run test:e2e -- --update-snapshots`; inspect the changed PNG before committing.
+
+School administrators manage existing staff roles and active state in **Staff access**. Use **Account security** to change a password; it signs out every session and requires a fresh authenticator code when MFA is enabled. Expired/stale access tokens are renewed without discarding unsaved settings.
 
 See [architecture](docs/foundation-architecture.md), [milestone evidence](docs/milestone-1.md), [review notes](docs/review.md), and the four source specifications in `docs/`. CI validates and packages release artifacts; deployment is deliberately absent and needs separate approval. GitHub branch protection must be set by a repository administrator.

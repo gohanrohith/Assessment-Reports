@@ -1,0 +1,37 @@
+import assert from 'node:assert/strict';
+import {PrismaClient,Prisma} from './client';
+import {PrismaPg} from '@prisma/adapter-pg';
+const db=new PrismaClient({adapter:new PrismaPg({connectionString:process.env.DATABASE_URL!})});
+const a='10000000-0000-4000-8000-000000000001',b='10000000-0000-4000-8000-000000000002';
+async function scope<T>(tenantId:string,fn:(tx:Prisma.TransactionClient)=>Promise<T>){return db.$transaction(async tx=>{await tx.$executeRaw`SELECT set_config('app.current_tenant_id',${tenantId},true)`;return fn(tx);});}
+async function main(){
+ const [role]=await db.$queryRaw<{rolsuper:boolean;rolbypassrls:boolean}[]>`SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user`;
+ assert.equal(role.rolsuper,false);assert.equal(role.rolbypassrls,false);
+ for(const tenantId of [a,b])await scope(tenantId,tx=>tx.probeResult.createMany({data:[
+  {tenantId,studentKey:'weighted',componentKey:'one',marks:'20',maximum:'25',weight:'30',status:'COMPLETE'},
+  {tenantId,studentKey:'weighted',componentKey:'two',marks:'30',maximum:'50',weight:'70',status:'COMPLETE'},
+  {tenantId,studentKey:'exempt',componentKey:'one',marks:'20',maximum:'25',weight:'30',status:'COMPLETE'},
+  {tenantId,studentKey:'exempt',componentKey:'two',marks:null,maximum:'50',weight:'70',status:'EXEMPT'},
+  {tenantId,studentKey:'absent',componentKey:'one',marks:null,maximum:'25',weight:'100',status:'ABSENT'},
+  {tenantId,studentKey:'incomplete',componentKey:'one',marks:null,maximum:'25',weight:'100',status:'INCOMPLETE'},
+ ]}));
+ assert.deepEqual(await db.probeResult.findMany(),[]);
+ const groups=await scope(a,tx=>tx.probeResult.groupBy({by:['studentKey','status'],where:{tenantId:a},_sum:{contribution:true,eligibleWeight:true},orderBy:{studentKey:'asc'}}));
+ const scores=new Map<string,Prisma.Decimal|null>();
+ for(const key of ['weighted','exempt','absent','incomplete']){
+  const rows=groups.filter(row=>row.studentKey===key);
+  if(rows.some(row=>row.status==='INCOMPLETE')){scores.set(key,null);continue;}
+  const sum=rows.reduce((n,row)=>n.plus(row._sum.contribution??0),new Prisma.Decimal(0));
+  const weights=rows.reduce((n,row)=>n.plus(row._sum.eligibleWeight??0),new Prisma.Decimal(0));
+  scores.set(key,weights.isZero()?null:sum.div(weights).mul(100));
+ }
+ assert.equal(scores.get('weighted')?.toString(),'66');assert.equal(scores.get('exempt')?.toString(),'80');assert.equal(scores.get('absent')?.toString(),'0');assert.equal(scores.get('incomplete'),null);
+ const row=await scope(a,tx=>tx.probeResult.findFirstOrThrow({where:{tenantId:a,studentKey:'weighted',componentKey:'one'}}));
+ const updated=await scope(a,tx=>tx.probeResult.update({where:{id:row.id},data:{marks:'25'}}));
+ assert.equal(updated.contribution?.toString(),'30');
+ const scoped=await scope(a,tx=>tx.probeResult.findMany());assert(scoped.every(row=>row.tenantId===a));
+ await assert.rejects(scope(a,tx=>tx.probeResult.create({data:{tenantId:b,studentKey:'attack',componentKey:'one',marks:'1',maximum:'10',weight:'100',status:'COMPLETE'}})));
+ assert.deepEqual(await db.probeResult.findMany(),[]);
+ console.log('Prisma native aggregation, generated conditional projections, decimal arithmetic and probe RLS passed.');
+}
+main().finally(()=>db.$disconnect());

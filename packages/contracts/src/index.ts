@@ -19,3 +19,18 @@ export interface SessionResponse {
   expiresIn: 900;
   active_school_id: string | null;
 }
+
+export const staffRoles = [
+  'SCHOOL_ADMIN',
+  'PRINCIPAL',
+  'CLASS_TEACHER',
+  'SUBJECT_TEACHER',
+] as const;
+export interface StaffAccess {
+  id: string;
+  userId: string;
+  email: string;
+  role: (typeof staffRoles)[number];
+  active: boolean;
+  isSelf: boolean;
+}

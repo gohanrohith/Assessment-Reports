@@ -13,13 +13,14 @@ import {
 import { JwtModule, JwtService } from '@nestjs/jwt';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Response } from 'express';
-import { compare } from 'bcryptjs';
+import { compare, hash } from 'bcryptjs';
+import { Prisma } from '@prisma/client';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { TOTP, Secret } from 'otpauth';
 import { Database } from './database';
 import { Audit } from './audit';
 import { config } from './config';
-import { LoginDto, MfaConfirmDto, SwitchDto } from './dto';
+import { LoginDto, MfaConfirmDto, SwitchDto, PasswordChangeDto } from './dto';
 import { AuthRequest, Permission, Public } from './security';
 const privileged = ['SCHOOL_ADMIN', 'PRINCIPAL', 'REVIEWER'];
 const digest = (token: string) => createHash('sha256').update(token).digest('hex');
@@ -61,12 +62,20 @@ export class IdentityService {
       secret: Secret.fromBase32(secret),
     });
   }
-  async verifyMfa(userId: string, encrypted: string, code: string) {
+  async lockUser(tx: Prisma.TransactionClient, userId: string) {
+    await tx.$queryRaw`SELECT id FROM "User" WHERE id=${userId}::uuid FOR UPDATE`;
+  }
+  async verifyMfa(
+    userId: string,
+    encrypted: string,
+    code: string,
+    tx: Prisma.TransactionClient = this.db,
+  ) {
     const delta = this.totp(this.decrypt(encrypted)).validate({ token: code, window: 1 });
     if (delta === null) throw new UnauthorizedException('Invalid credentials or MFA code');
     const step = BigInt(Math.floor(Date.now() / 30000) + delta);
-    const changed = await this.db.user.updateMany({
-      where: { id: userId, lastTotpStep: { lt: step } },
+    const changed = await tx.user.updateMany({
+      where: { id: userId, mfaSecret: encrypted, lastTotpStep: { lt: step } },
       data: { lastTotpStep: step },
     });
     if (changed.count !== 1) throw new UnauthorizedException('MFA code already used');
@@ -95,7 +104,6 @@ export class IdentityService {
     if (user.mfaEnabled) {
       if (!dto.code || !user.mfaSecret)
         throw new UnauthorizedException('Invalid credentials or MFA code');
-      await this.verifyMfa(user.id, user.mfaSecret, dto.code);
     }
     const schoolId = dto.schoolId ?? (user.platformAdmin ? null : memberships[0]?.tenantId);
     if (!schoolId && !user.platformAdmin)
@@ -103,6 +111,20 @@ export class IdentityService {
     if (schoolId) await this.checkSchool(user.id, schoolId);
     const refresh = randomBytes(48).toString('base64url');
     const session = await this.db.$transaction(async (tx) => {
+      // Serialize credential changes, MFA setup and session creation for this identity.
+      await this.lockUser(tx, user.id);
+      const live = await tx.user.findUniqueOrThrow({ where: { id: user.id } });
+      if (
+        live.passwordHash !== user.passwordHash ||
+        live.mfaEnabled !== user.mfaEnabled ||
+        live.mfaSecret !== user.mfaSecret ||
+        live.platformAdmin !== user.platformAdmin
+      )
+        throw new UnauthorizedException('Credentials changed; sign in again');
+      if (live.mfaEnabled) {
+        await this.verifyMfa(live.id, live.mfaSecret!, dto.code!, tx);
+        await this.audit.write('auth.mfa.verify', live.id, live.id, cid, null, {}, tx);
+      }
       const session = await tx.session.create({
         data: {
           userId: user.id,
@@ -186,7 +208,13 @@ export class IdentityService {
     const secret = new Secret({ size: 20 }).base32;
     const encrypted = this.encrypt(secret);
     await this.db.$transaction(async (tx) => {
-      await tx.user.update({ where: { id: user.id }, data: { mfaSecret: encrypted } });
+      await this.lockUser(tx, user.id);
+      const changed = await tx.user.updateMany({
+        where: { id: user.id, passwordHash: user.passwordHash, mfaEnabled: false },
+        data: { mfaSecret: encrypted },
+      });
+      if (changed.count !== 1)
+        throw new BadRequestException('MFA already enabled or credentials changed');
       await this.audit.write('auth.mfa.enroll', user.id, user.id, cid, null, {}, tx);
     });
     return {
@@ -208,17 +236,18 @@ export class IdentityService {
     } catch {
       throw new UnauthorizedException();
     }
-    const user = await this.db.user.findUnique({ where: { id: claim.sub } });
-    if (
-      claim.purpose !== 'mfa-enroll' ||
-      !user?.mfaSecret ||
-      user.mfaEnabled ||
-      digest(user.mfaSecret) !== claim.binding
-    )
-      throw new UnauthorizedException();
-    await this.verifyMfa(user.id, user.mfaSecret, dto.code);
+    if (claim.purpose !== 'mfa-enroll') throw new UnauthorizedException();
     await this.db.$transaction(async (tx) => {
+      await this.lockUser(tx, claim.sub);
+      const user = await tx.user.findUnique({ where: { id: claim.sub } });
+      if (!user?.mfaSecret || user.mfaEnabled || digest(user.mfaSecret) !== claim.binding)
+        throw new UnauthorizedException();
+      await this.verifyMfa(user.id, user.mfaSecret, dto.code, tx);
       await tx.user.update({ where: { id: user.id }, data: { mfaEnabled: true } });
+      await tx.session.updateMany({
+        where: { userId: user.id, revoked: false },
+        data: { revoked: true },
+      });
       await this.audit.write('auth.mfa.confirm', user.id, user.id, cid, null, {}, tx);
     });
     return { enabled: true };
@@ -235,9 +264,60 @@ export class IdentityService {
     );
     return schools.filter((s) => s !== null);
   }
+  async changePassword(req: AuthRequest, dto: PasswordChangeDto) {
+    const user = await this.db.user.findUnique({ where: { id: req.identity.sub } });
+    if (!user || !(await compare(dto.currentPassword, user.passwordHash)))
+      throw new UnauthorizedException('Current password or MFA code invalid');
+    if (await compare(dto.newPassword, user.passwordHash))
+      throw new BadRequestException('Choose a different password');
+    const passwordHash = await hash(dto.newPassword, 12);
+    await this.db.$transaction(async (tx) => {
+      await this.lockUser(tx, user.id);
+      const live = await tx.user.findUniqueOrThrow({ where: { id: user.id } });
+      const session = await tx.session.findFirst({
+        where: {
+          id: req.identity.sid,
+          userId: user.id,
+          version: req.identity.version,
+          revoked: false,
+          expiresAt: { gt: new Date() },
+        },
+      });
+      if (!session || live.passwordHash !== user.passwordHash)
+        throw new UnauthorizedException('Credentials changed; sign in again');
+      if (live.mfaEnabled) {
+        if (!live.mfaSecret || !dto.code)
+          throw new UnauthorizedException('Current password or MFA code invalid');
+        await this.verifyMfa(live.id, live.mfaSecret, dto.code, tx);
+      }
+      await tx.user.update({ where: { id: live.id }, data: { passwordHash } });
+      await tx.session.updateMany({
+        where: { userId: live.id, revoked: false },
+        data: { revoked: true },
+      });
+      await this.audit.write(
+        'auth.password.change',
+        live.id,
+        live.id,
+        req.correlationId,
+        null,
+        { sessionsRevoked: true },
+        tx,
+      );
+    });
+    return { loggedOut: true };
+  }
   async switchSchool(req: AuthRequest, schoolId: string) {
     await this.checkSchool(req.identity.sub, schoolId);
     const session = await this.db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.current_tenant_id', ${schoolId}, true)`;
+      await tx.$executeRaw`SELECT set_config('app.current_user_id', ${req.identity.sub}, true)`;
+      const target = await tx.membership.findFirst({
+        where: { tenantId: schoolId, userId: req.identity.sub, active: true },
+      });
+      const existing = await tx.session.findUnique({ where: { id: req.identity.sid } });
+      if (!target || !existing || (privileged.includes(target.role) && !existing.mfaVerified))
+        throw new UnauthorizedException('Sign in with MFA before switching to this school');
       const changed = await tx.session.updateMany({
         where: { id: req.identity.sid, version: req.identity.version, revoked: false },
         data: { activeSchoolId: schoolId, version: { increment: 1 } },
@@ -308,6 +388,20 @@ export class IdentityController {
     @Req() req: AuthRequest,
   ) {
     return this.service.switchSchool(req, dto.schoolId);
+  }
+  @ApiBearerAuth() @Permission('self') @Post('password') async changePassword(
+    @Body() dto: PasswordChangeDto,
+    @Req() req: AuthRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.service.changePassword(req, dto);
+    res.clearCookie('refresh', {
+      path: '/v1/auth',
+      httpOnly: true,
+      secure: config().production,
+      sameSite: 'strict',
+    });
+    return result;
   }
   @ApiBearerAuth() @Permission('self') @Post('logout') async logout(
     @Req() req: AuthRequest,

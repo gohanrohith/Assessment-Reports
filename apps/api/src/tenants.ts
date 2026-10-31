@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { randomUUID } from 'node:crypto';
+import { StaffAccessController } from './staff-access';
 import { Database } from './database';
 import { Audit } from './audit';
 import { AuthRequest, Permission } from './security';
@@ -103,5 +104,5 @@ export class TenantController {
     });
   }
 }
-@Module({ controllers: [TenantController] })
+@Module({ controllers: [TenantController, StaffAccessController] })
 export class TenantsModule {}

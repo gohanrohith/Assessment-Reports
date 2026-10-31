@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd /workspace/Assessment-Reports
+command -v pdftoppm >/dev/null || { echo "Install Poppler (poppler-utils) for PDF regression checks." >&2; exit 1; }
 node scripts/init-env.mjs
 npm ci --ignore-scripts
 npm run generate

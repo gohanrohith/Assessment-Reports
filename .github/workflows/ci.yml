@@ -2,7 +2,7 @@ name: Foundation checks
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'foundation/**']
 permissions:
   contents: read
 jobs:
@@ -40,6 +40,7 @@ jobs:
       - run: npm run db:migrate && npm run db:migrate
       - run: npm run check
       - run: npx playwright install-deps chromium
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
       - run: npm run test:e2e
       - run: npm audit --audit-level=high
       - uses: actions/upload-artifact@v4

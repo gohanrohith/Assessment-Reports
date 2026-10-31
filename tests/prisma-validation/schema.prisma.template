@@ -1,0 +1,24 @@
+generator client {
+ provider = "prisma-client-js"
+ engineType = "client"
+ output = env("PROBE_CLIENT_OUTPUT")
+}
+datasource db {
+ provider = "postgresql"
+ url = env("DATABASE_URL")
+ schemas = ["SCHEMA_NAME"]
+}
+model ProbeResult {
+ id String @id @default(uuid()) @db.Uuid
+ tenantId String @db.Uuid @map("tenant_id")
+ studentKey String
+ componentKey String
+ marks Decimal? @db.Decimal(12,4)
+ maximum Decimal @db.Decimal(12,4)
+ weight Decimal @db.Decimal(12,4)
+ status String
+ contribution Decimal? @default(dbgenerated()) @db.Decimal(20,8)
+ eligibleWeight Decimal @default(dbgenerated()) @db.Decimal(12,4)
+ @@index([tenantId])
+ @@schema("SCHEMA_NAME")
+}

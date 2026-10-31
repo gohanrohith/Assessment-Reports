@@ -126,3 +126,9 @@ footer {
     display: block;
   }
 }
+
+.toggle {
+  display: inline-block;
+  width: auto;
+  margin-right: 8px;
+}

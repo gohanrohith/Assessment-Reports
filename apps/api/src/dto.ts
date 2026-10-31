@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsEmail,
   IsIn,
   IsOptional,
@@ -51,4 +52,19 @@ export class SchoolDto {
 }
 export class StatusDto {
   @ApiProperty() @IsIn(['ACTIVE', 'SUSPENDED', 'OFFBOARDED']) status!: string;
+}
+
+export class PasswordChangeDto {
+  @ApiProperty() @IsString() @IsByteLength(12, 72) currentPassword!: string;
+  @ApiProperty() @IsString() @IsByteLength(12, 72) newPassword!: string;
+  @ApiPropertyOptional() @IsOptional() @Matches(/^\d{6}$/) code?: string;
+}
+export class StaffAccessDto {
+  @ApiProperty() @IsIn(['SCHOOL_ADMIN', 'PRINCIPAL', 'CLASS_TEACHER', 'SUBJECT_TEACHER']) role!:
+    'SCHOOL_ADMIN' | 'PRINCIPAL' | 'CLASS_TEACHER' | 'SUBJECT_TEACHER';
+  @ApiProperty() @IsBoolean() active!: boolean;
+  @ApiProperty()
+  @IsIn(['SCHOOL_ADMIN', 'PRINCIPAL', 'CLASS_TEACHER', 'SUBJECT_TEACHER'])
+  expectedRole!: 'SCHOOL_ADMIN' | 'PRINCIPAL' | 'CLASS_TEACHER' | 'SUBJECT_TEACHER';
+  @ApiProperty() @IsBoolean() expectedActive!: boolean;
 }

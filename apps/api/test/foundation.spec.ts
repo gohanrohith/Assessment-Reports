@@ -437,3 +437,316 @@ test('bcrypt byte-length guard prevents silent UTF-8 password truncation', async
     .send({ email: 'teacher' + suffix + '@example.test', password: '🔒'.repeat(30) })
     .expect(400);
 });
+
+test('password change verifies old credentials, revokes all sessions and audits without secrets', async () => {
+  const name = 'passwordchange';
+  const id = await user(name, 'SUBJECT_TEACHER', [schoolA]);
+  const first = await login(name),
+    second = await login(name);
+  const endpoint = () =>
+    request(app.getHttpServer())
+      .post('/v1/auth/password')
+      .auth(first.body.accessToken, { type: 'bearer' });
+  const replacement = 'Replacement-Password-2026';
+  await endpoint()
+    .send({ currentPassword: 'Incorrect-password-2026', newPassword: replacement })
+    .expect(401);
+  await endpoint().send({ currentPassword: password, newPassword: password }).expect(400);
+  await endpoint().send({ currentPassword: password, newPassword: replacement }).expect(201);
+  for (const session of [first, second]) {
+    await request(app.getHttpServer())
+      .get('/v1/schools/' + schoolA)
+      .auth(session.body.accessToken, { type: 'bearer' })
+      .expect(401);
+    await request(app.getHttpServer())
+      .post('/v1/auth/refresh')
+      .set('Cookie', session.headers['set-cookie'][0].split(';')[0])
+      .expect(401);
+  }
+  expect((await login(name)).status).toBe(401);
+  await request(app.getHttpServer())
+    .post('/v1/auth/login')
+    .send({ email: name + suffix + '@example.test', password: replacement, schoolId: schoolA })
+    .expect(201);
+  const events = await owner.auditEvent.findMany({
+    where: { actorId: id, action: 'auth.password.change' },
+  });
+  expect(events).toHaveLength(1);
+  expect(JSON.stringify(events)).not.toContain(replacement);
+});
+test('password change requires a fresh MFA code when MFA is enabled', async () => {
+  const name = 'passwordmfa';
+  const id = await user(name, 'PRINCIPAL', [schoolA]);
+  const code = await enableMfa(id),
+    logged = await login(name, code);
+  const endpoint = () =>
+    request(app.getHttpServer())
+      .post('/v1/auth/password')
+      .auth(logged.body.accessToken, { type: 'bearer' });
+  const body = { currentPassword: password, newPassword: 'New-Privileged-Password-2026' };
+  await endpoint().send(body).expect(401);
+  await endpoint()
+    .send({ ...body, code })
+    .expect(401);
+  const fresh = identity.totp('JBSWY3DPEHPK3PXP').generate({ timestamp: Date.now() + 30000 });
+  await endpoint()
+    .send({ ...body, code: fresh })
+    .expect(201);
+  expect((await owner.user.findUniqueOrThrow({ where: { id } })).mfaEnabled).toBe(true);
+});
+test('MFA setup rejects obsolete enrollment tokens and invalidates old password-only sessions', async () => {
+  const name = 'mfarenew';
+  await user(name, 'SUBJECT_TEACHER', [schoolA]);
+  const logged = await login(name);
+  const setup = () =>
+    request(app.getHttpServer())
+      .post('/v1/auth/mfa/enroll')
+      .send({ email: name + suffix + '@example.test', password });
+  const first = await setup().expect(201),
+    second = await setup().expect(201);
+  const { TOTP, Secret } = await import('otpauth');
+  const code = (uri: string) =>
+    new TOTP({ secret: Secret.fromBase32(new URL(uri).searchParams.get('secret')!) }).generate();
+  await request(app.getHttpServer())
+    .post('/v1/auth/mfa/confirm')
+    .send({ enrollmentToken: first.body.enrollmentToken, code: code(first.body.otpauthUrl) })
+    .expect(401);
+  const results = await Promise.all(
+    [0, 1].map(() =>
+      request(app.getHttpServer())
+        .post('/v1/auth/mfa/confirm')
+        .send({ enrollmentToken: second.body.enrollmentToken, code: code(second.body.otpauthUrl) }),
+    ),
+  );
+  expect(results.map((r) => r.status).sort()).toEqual([201, 401]);
+  await request(app.getHttpServer())
+    .get('/v1/schools/' + schoolA)
+    .auth(logged.body.accessToken, { type: 'bearer' })
+    .expect(401);
+  await setup().expect(400);
+});
+test('an enrollment started before MFA confirmation cannot replace the confirmed secret', async () => {
+  const name = 'mfarace';
+  const id = await user(name, 'SUBJECT_TEACHER', [schoolA]);
+  const setup = await request(app.getHttpServer())
+    .post('/v1/auth/mfa/enroll')
+    .send({ email: name + suffix + '@example.test', password })
+    .expect(201);
+  let ready!: () => void, release!: () => void;
+  const paused = new Promise<void>((r) => {
+      ready = r;
+    }),
+    resume = new Promise<void>((r) => {
+      release = r;
+    });
+  const original = identity.credentials.bind(identity);
+  const spy = jest.spyOn(identity, 'credentials').mockImplementationOnce(async (dto) => {
+    const value = await original(dto);
+    ready();
+    await resume;
+    return value;
+  });
+  try {
+    const pending = request(app.getHttpServer())
+      .post('/v1/auth/mfa/enroll')
+      .send({ email: name + suffix + '@example.test', password })
+      .then((r) => r);
+    await paused;
+    const { TOTP, Secret } = await import('otpauth');
+    const totp = new TOTP({
+      secret: Secret.fromBase32(new URL(setup.body.otpauthUrl).searchParams.get('secret')!),
+    });
+    await request(app.getHttpServer())
+      .post('/v1/auth/mfa/confirm')
+      .send({ enrollmentToken: setup.body.enrollmentToken, code: totp.generate() })
+      .expect(201);
+    const encrypted = (await owner.user.findUniqueOrThrow({ where: { id } })).mfaSecret;
+    release();
+    expect((await pending).status).toBe(400);
+    expect((await owner.user.findUniqueOrThrow({ where: { id } })).mfaSecret).toBe(encrypted);
+  } finally {
+    release();
+    spy.mockRestore();
+  }
+});
+test('a password change prevents an in-flight old-password login from creating a session', async () => {
+  const name = 'passwordrace';
+  await user(name, 'SUBJECT_TEACHER', [schoolA]);
+  const logged = await login(name);
+  let ready!: () => void, release!: () => void;
+  const paused = new Promise<void>((r) => {
+      ready = r;
+    }),
+    resume = new Promise<void>((r) => {
+      release = r;
+    });
+  const original = identity.credentials.bind(identity);
+  const spy = jest.spyOn(identity, 'credentials').mockImplementationOnce(async (dto) => {
+    const value = await original(dto);
+    ready();
+    await resume;
+    return value;
+  });
+  try {
+    const pending = login(name).then((r) => r);
+    await paused;
+    await request(app.getHttpServer())
+      .post('/v1/auth/password')
+      .auth(logged.body.accessToken, { type: 'bearer' })
+      .send({ currentPassword: password, newPassword: 'New-Race-Password-2026' })
+      .expect(201);
+    release();
+    expect((await pending).status).toBe(401);
+  } finally {
+    release();
+    spy.mockRestore();
+  }
+});
+test('a password-only session cannot switch into a newly granted privileged school context', async () => {
+  const name = 'switchmfa';
+  const id = await user(name, 'SUBJECT_TEACHER', [schoolA, schoolB]);
+  const logged = await login(name);
+  await owner.membership.updateMany({
+    where: { tenantId: schoolB, userId: id },
+    data: { role: 'PRINCIPAL' },
+  });
+  await request(app.getHttpServer())
+    .post('/v1/auth/context-switch')
+    .auth(logged.body.accessToken, { type: 'bearer' })
+    .send({ schoolId: schoolB })
+    .expect(401);
+  await request(app.getHttpServer())
+    .get('/v1/schools/' + schoolA)
+    .auth(logged.body.accessToken, { type: 'bearer' })
+    .expect(200);
+});
+
+test('staff access lists only the active school and excludes authentication secrets', async () => {
+  const rows = await request(app.getHttpServer())
+    .get('/v1/schools/' + schoolA + '/staff-access')
+    .auth(adminToken, { type: 'bearer' })
+    .expect(200);
+  expect(
+    rows.body.some(
+      (row: { userId: string; isSelf: boolean }) => row.userId === adminId && row.isSelf,
+    ),
+  ).toBe(true);
+  expect(JSON.stringify(rows.body)).not.toContain('passwordHash');
+  expect(JSON.stringify(rows.body)).not.toContain('mfaSecret');
+  await request(app.getHttpServer())
+    .get('/v1/schools/' + schoolB + '/staff-access')
+    .auth(adminToken, { type: 'bearer' })
+    .expect(404);
+  await user('staffviewer', 'SUBJECT_TEACHER', [schoolA]);
+  const viewer = (await login('staffviewer')).body.accessToken;
+  for (const token of [viewer, operatorToken])
+    await request(app.getHttpServer())
+      .get('/v1/schools/' + schoolA + '/staff-access')
+      .auth(token, { type: 'bearer' })
+      .expect(403);
+});
+test('staff access changes invalidate only affected-school sessions and include before/after audit', async () => {
+  const name = 'stafftarget';
+  const id = await user(name, 'CLASS_TEACHER', [schoolA, schoolB]);
+  const first = await login(name),
+    second = await request(app.getHttpServer())
+      .post('/v1/auth/login')
+      .send({ email: name + suffix + '@example.test', password, schoolId: schoolB })
+      .expect(201);
+  const membership = await owner.membership.findUniqueOrThrow({
+    where: { tenantId_userId: { tenantId: schoolA, userId: id } },
+  });
+  const endpoint = '/v1/schools/' + schoolA + '/staff-access/' + membership.id;
+  await request(app.getHttpServer())
+    .patch(endpoint)
+    .auth(adminToken, { type: 'bearer' })
+    .send({
+      role: 'SUBJECT_TEACHER',
+      active: false,
+      expectedRole: 'CLASS_TEACHER',
+      expectedActive: true,
+    })
+    .expect(200);
+  await request(app.getHttpServer())
+    .get('/v1/schools/' + schoolA)
+    .auth(first.body.accessToken, { type: 'bearer' })
+    .expect(401);
+  await request(app.getHttpServer())
+    .get('/v1/schools/' + schoolB)
+    .auth(second.body.accessToken, { type: 'bearer' })
+    .expect(200);
+  const untouched = await owner.membership.findUniqueOrThrow({
+    where: { tenantId_userId: { tenantId: schoolB, userId: id } },
+  });
+  expect(untouched.role).toBe('CLASS_TEACHER');
+  expect(untouched.active).toBe(true);
+  const events = await owner.auditEvent.findMany({
+    where: { tenantId: schoolA, targetId: membership.id, action: 'staff.access.update' },
+  });
+  expect(events).toHaveLength(1);
+  expect(events[0].details).toEqual({
+    before: { role: 'CLASS_TEACHER', active: true },
+    after: { role: 'SUBJECT_TEACHER', active: false },
+  });
+  await request(app.getHttpServer())
+    .patch(endpoint)
+    .auth(adminToken, { type: 'bearer' })
+    .send({
+      role: 'SUBJECT_TEACHER',
+      active: true,
+      expectedRole: 'SUBJECT_TEACHER',
+      expectedActive: false,
+    })
+    .expect(200);
+  expect((await login(name)).status).toBe(201);
+});
+test('staff access denies cross-tenant object IDs, role escalation and self-lockout', async () => {
+  const id = await user('staffforeign', 'CLASS_TEACHER', [schoolB]);
+  const foreign = await owner.membership.findUniqueOrThrow({
+    where: { tenantId_userId: { tenantId: schoolB, userId: id } },
+  });
+  const self = await owner.membership.findUniqueOrThrow({
+    where: { tenantId_userId: { tenantId: schoolA, userId: adminId } },
+  });
+  const body = {
+    role: 'SUBJECT_TEACHER',
+    active: false,
+    expectedRole: 'CLASS_TEACHER',
+    expectedActive: true,
+  };
+  for (const membershipId of [foreign.id, ...Array.from({ length: 5 }, () => randomUUID())])
+    await request(app.getHttpServer())
+      .patch('/v1/schools/' + schoolA + '/staff-access/' + membershipId)
+      .auth(adminToken, { type: 'bearer' })
+      .send(body)
+      .expect(404);
+  await request(app.getHttpServer())
+    .patch('/v1/schools/' + schoolA + '/staff-access/' + self.id)
+    .auth(adminToken, { type: 'bearer' })
+    .send({ ...body, expectedRole: 'SCHOOL_ADMIN' })
+    .expect(409);
+  await request(app.getHttpServer())
+    .patch('/v1/schools/' + schoolA + '/staff-access/' + self.id)
+    .auth(adminToken, { type: 'bearer' })
+    .send({ ...body, role: 'PLATFORM_ADMIN' })
+    .expect(400);
+});
+test('concurrent staff changes reject stale edits instead of silently overwriting', async () => {
+  const id = await user('staffconflict', 'CLASS_TEACHER', [schoolA]);
+  const membership = await owner.membership.findUniqueOrThrow({
+    where: { tenantId_userId: { tenantId: schoolA, userId: id } },
+  });
+  const results = await Promise.all(
+    ['SUBJECT_TEACHER', 'PRINCIPAL'].map((role) =>
+      request(app.getHttpServer())
+        .patch('/v1/schools/' + schoolA + '/staff-access/' + membership.id)
+        .auth(adminToken, { type: 'bearer' })
+        .send({ role, active: true, expectedRole: 'CLASS_TEACHER', expectedActive: true }),
+    ),
+  );
+  expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+  const events = await owner.auditEvent.count({
+    where: { tenantId: schoolA, targetId: membership.id, action: 'staff.access.update' },
+  });
+  expect(events).toBe(1);
+});

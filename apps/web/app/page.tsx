@@ -1,6 +1,7 @@
 'use client';
-import { useEffect, useState, type FormEvent } from 'react';
-import type { SchoolContext } from '../../../packages/contracts/src';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { StaffAccessPanel, type StaffDraft } from './staff-access';
+import type { StaffAccess, SchoolContext } from '../../../packages/contracts/src';
 type Profile = {
   id?: string;
   legalName: string;
@@ -29,7 +30,17 @@ const empty: Profile = {
   contactEmail: '',
   campuses: [],
 };
+type BrowserSession = { accessToken: string; active_school_id: string | null };
 export default function Home() {
+  const [staff, setStaff] = useState<StaffDraft[]>([]);
+  const tokenRef = useRef('');
+  const activeRef = useRef<string | null>(null);
+  const refreshInFlight = useRef<Promise<BrowserSession> | null>(null);
+  const [currentPassword, setCurrentPassword] = useState(''),
+    [newPassword, setNewPassword] = useState(''),
+    [confirmPassword, setConfirmPassword] = useState(''),
+    [passwordCode, setPasswordCode] = useState('');
+
   const [token, setToken] = useState(''),
     [schools, setSchools] = useState<SchoolContext[]>([]),
     [active, setActive] = useState<string | null>(null);
@@ -46,7 +57,59 @@ export default function Home() {
   } | null>(null);
   const [profile, setProfile] = useState<Profile>(empty),
     [dirty, setDirty] = useState(false);
-  async function request(path: string, method = 'GET', body?: unknown, access = token) {
+  function updateToken(value: string) {
+    tokenRef.current = value;
+    setToken(value);
+  }
+  function clearAccountSecrets() {
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setPasswordCode('');
+  }
+  function clearSession() {
+    updateToken('');
+    activeRef.current = null;
+    setActive(null);
+    setSchools([]);
+    setStaff([]);
+    setProfile(empty);
+    setDirty(false);
+    setPassword('');
+    setCode('');
+    setEnrollment(null);
+    clearAccountSecrets();
+  }
+  function refreshSession(): Promise<BrowserSession> {
+    if (!refreshInFlight.current) {
+      refreshInFlight.current = fetch('/v1/auth/refresh', {
+        method: 'POST',
+        credentials: 'include',
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            if (res.status === 401) clearSession();
+            throw new Error(
+              res.status === 401
+                ? 'Session expired. Sign in again.'
+                : 'Session renewal unavailable. Try again.',
+            );
+          }
+          return res.json();
+        })
+        .finally(() => {
+          refreshInFlight.current = null;
+        });
+    }
+    return refreshInFlight.current;
+  }
+  async function request<T = unknown>(
+    path: string,
+    method = 'GET',
+    body?: unknown,
+    access = tokenRef.current,
+    allowRenew = true,
+  ): Promise<T> {
     const res = await fetch('/v1/' + path, {
       method,
       credentials: 'include',
@@ -57,6 +120,20 @@ export default function Home() {
       body: body ? JSON.stringify(body) : undefined,
     });
     const value = await res.json();
+    if (
+      res.status === 401 &&
+      value.message === 'Session invalid or expired' &&
+      access &&
+      allowRenew
+    ) {
+      if (tokenRef.current === access) {
+        const session = await refreshSession();
+        if (session.active_school_id !== activeRef.current)
+          throw new Error('School context changed in another tab. Reload before continuing.');
+        updateToken(session.accessToken);
+      }
+      return request<T>(path, method, body, tokenRef.current, false);
+    }
     if (!res.ok)
       throw new Error(
         Array.isArray(value.message)
@@ -65,32 +142,51 @@ export default function Home() {
       );
     return value;
   }
-  async function accept(session: { accessToken: string; active_school_id: string | null }) {
-    setToken(session.accessToken);
-    setActive(session.active_school_id);
-    const list: SchoolContext[] = await request(
+  const staffDirty = staff.some(
+    (row) => row.role !== row.expectedRole || row.active !== row.expectedActive,
+  );
+  const hasUnsavedChanges = dirty || staffDirty;
+  const drafts = (rows: StaffAccess[]): StaffDraft[] =>
+    rows.map((row) => ({ ...row, expectedRole: row.role, expectedActive: row.active }));
+  async function accept(session: BrowserSession) {
+    const list = await request<SchoolContext[]>(
       'auth/schools',
       'GET',
       undefined,
       session.accessToken,
     );
+    const profile = session.active_school_id
+      ? await request<Profile>(
+          'schools/' + session.active_school_id,
+          'GET',
+          undefined,
+          session.accessToken,
+        )
+      : empty;
+    const admin = list.find((s) => s.id === session.active_school_id)?.role === 'SCHOOL_ADMIN';
+    const staff = admin
+      ? await request<StaffAccess[]>(
+          'schools/' + session.active_school_id + '/staff-access',
+          'GET',
+          undefined,
+          session.accessToken,
+        )
+      : [];
+    // Apply the new context only after its profile and permissions have loaded.
+    updateToken(session.accessToken);
+    activeRef.current = session.active_school_id;
+    setActive(session.active_school_id);
     setSchools(list);
-    if (session.active_school_id) {
-      const p = await request(
-        'schools/' + session.active_school_id,
-        'GET',
-        undefined,
-        session.accessToken,
-      );
-      setProfile(p);
-    } else setProfile(empty);
+    setProfile(profile);
+    setStaff(drafts(staff));
     setDirty(false);
+    clearAccountSecrets();
   }
   useEffect(() => {
     let mounted = true;
-    fetch('/v1/auth/refresh', { method: 'POST', credentials: 'include' })
-      .then(async (res) => {
-        if (res.ok && mounted) await accept(await res.json());
+    refreshSession()
+      .then(async (session) => {
+        if (mounted) await accept(session);
       })
       .catch(() => {})
       .finally(() => {
@@ -102,11 +198,11 @@ export default function Home() {
   }, []); // Token stays in memory; refresh cookie restores a session.
   useEffect(() => {
     const guard = (event: BeforeUnloadEvent) => {
-      if (dirty) event.preventDefault();
+      if (hasUnsavedChanges) event.preventDefault();
     };
     window.addEventListener('beforeunload', guard);
     return () => window.removeEventListener('beforeunload', guard);
-  }, [dirty]);
+  }, [hasUnsavedChanges]);
   async function run(work: () => Promise<void>) {
     setBusy(true);
     setError('');
@@ -123,15 +219,28 @@ export default function Home() {
     e.preventDefault();
     await run(async () => {
       await accept(
-        await request('auth/login', 'POST', { email, password, ...(code ? { code } : {}) }, ''),
+        await request<BrowserSession>(
+          'auth/login',
+          'POST',
+          { email, password, ...(code ? { code } : {}) },
+          '',
+        ),
       );
       setPassword('');
       setCode('');
+      setEnrollment(null);
     });
   }
   async function enroll() {
     await run(async () =>
-      setEnrollment(await request('auth/mfa/enroll', 'POST', { email, password }, '')),
+      setEnrollment(
+        await request<{ otpauthUrl: string; enrollmentToken: string }>(
+          'auth/mfa/enroll',
+          'POST',
+          { email, password },
+          '',
+        ),
+      ),
     );
   }
   async function confirm() {
@@ -148,8 +257,14 @@ export default function Home() {
     });
   }
   async function switchSchool(id: string) {
-    if (dirty && !window.confirm('Discard unsaved school settings and switch schools?')) return;
-    await run(async () => accept(await request('auth/context-switch', 'POST', { schoolId: id })));
+    if (
+      hasUnsavedChanges &&
+      !window.confirm('Discard unsaved school settings or staff access changes and switch schools?')
+    )
+      return;
+    await run(async () =>
+      accept(await request<BrowserSession>('auth/context-switch', 'POST', { schoolId: id })),
+    );
   }
   async function save(e: FormEvent) {
     e.preventDefault();
@@ -182,6 +297,48 @@ export default function Home() {
       );
       if (!active) setProfile(empty);
     });
+  }
+  async function changePassword(event: FormEvent) {
+    event.preventDefault();
+    if (newPassword !== confirmPassword) {
+      setError('New passwords do not match.');
+      return;
+    }
+    if (hasUnsavedChanges && !window.confirm('Discard unsaved settings and change your password?'))
+      return;
+    await run(async () => {
+      await request('auth/password', 'POST', {
+        currentPassword,
+        newPassword,
+        ...(passwordCode ? { code: passwordCode } : {}),
+      });
+      clearSession();
+      setNotice('Password changed. All sessions signed out. Sign in with your new password.');
+    });
+  }
+  async function saveStaff(row: StaffDraft) {
+    await run(async () => {
+      await request('schools/' + active + '/staff-access/' + row.id, 'PATCH', {
+        role: row.role,
+        active: row.active,
+        expectedRole: row.expectedRole,
+        expectedActive: row.expectedActive,
+      });
+      setStaff((current) =>
+        current.map((item) =>
+          item.id === row.id
+            ? { ...item, expectedRole: row.role, expectedActive: row.active }
+            : item,
+        ),
+      );
+      setNotice('Staff access saved. Affected sessions were signed out.');
+    });
+  }
+  async function reloadStaff() {
+    if (staffDirty && !window.confirm('Discard unsaved staff access changes?')) return;
+    await run(async () =>
+      setStaff(drafts(await request<StaffAccess[]>('schools/' + active + '/staff-access'))),
+    );
   }
   const canEdit = !active || schools.find((s) => s.id === active)?.role === 'SCHOOL_ADMIN';
   return (
@@ -274,13 +431,13 @@ export default function Home() {
               disabled={busy}
               onClick={() =>
                 void run(async () => {
-                  if (dirty && !window.confirm('Discard unsaved school settings and sign out?'))
+                  if (
+                    hasUnsavedChanges &&
+                    !window.confirm('Discard unsaved school settings and sign out?')
+                  )
                     return;
                   await request('auth/logout', 'POST');
-                  setToken('');
-                  setSchools([]);
-                  setProfile(empty);
-                  setDirty(false);
+                  clearSession();
                 })
               }
             >
@@ -381,6 +538,70 @@ export default function Home() {
             {!canEdit && (
               <p>Your role can view this profile. School administrators manage its settings.</p>
             )}
+          </section>
+          {active && canEdit && (
+            <StaffAccessPanel
+              rows={staff}
+              busy={busy}
+              onChange={(id, patch) =>
+                setStaff((rows) => rows.map((row) => (row.id === id ? { ...row, ...patch } : row)))
+              }
+              onSave={(row) => void saveStaff(row)}
+              onReload={() => void reloadStaff()}
+            />
+          )}
+          <section aria-labelledby="account-security">
+            <h2 id="account-security">Account security</h2>
+            <p>Changing your password signs out every session. MFA remains enabled.</p>
+            <form onSubmit={changePassword}>
+              <label>
+                Current password
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  minLength={12}
+                  maxLength={72}
+                  required
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                />
+              </label>
+              <label>
+                New password
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  minLength={12}
+                  maxLength={72}
+                  required
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                />
+              </label>
+              <label>
+                Confirm new password
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  minLength={12}
+                  maxLength={72}
+                  required
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                />
+              </label>
+              <label>
+                Current authenticator code (if enabled)
+                <input
+                  inputMode="numeric"
+                  pattern="[0-9]{6}"
+                  autoComplete="one-time-code"
+                  value={passwordCode}
+                  onChange={(e) => setPasswordCode(e.target.value)}
+                />
+              </label>
+              <button disabled={busy}>Change password</button>
+            </form>
           </section>
         </>
       )}

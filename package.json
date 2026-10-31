@@ -19,11 +19,13 @@
     "test": "npm run test -w @assessment/api",
     "test:e2e": "playwright test",
     "build": "npm run build --workspaces --if-present",
-    "check": "npm run lint && npm run format:check && npm run typecheck && npm run test:migrations && npm test && npm run build",
+    "check": "npm run lint && npm run format:check && npm run typecheck && npm run test:migrations && npm run test:prisma && npm test && npm run build",
     "user:create": "tsx scripts/create-user.ts",
     "maintenance": "tsx scripts/maintenance.ts",
     "format:check": "prettier --check apps packages scripts tests prisma.config.ts playwright.config.ts eslint.config.mjs",
-    "test:migrations": "tsx scripts/validate-migrations.ts"
+    "test:migrations": "tsx scripts/validate-migrations.ts",
+    "test:pdf:update": "UPDATE_PDF_BASELINES=1 playwright test tests/e2e/pdf-regression.spec.ts",
+    "test:prisma": "tsx scripts/validate-prisma.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",
@@ -31,13 +33,16 @@
     "@sparticuz/chromium": "^153.0.0",
     "@types/node": "^24.10.0",
     "@types/pg": "^8.23.1",
+    "@types/pngjs": "^6.0.5",
     "concurrently": "^9.2.1",
     "eslint": "^9.39.0",
+    "pixelmatch": "^8.0.0",
+    "pngjs": "^7.0.0",
+    "prettier": "^3.6.2",
     "prisma": "6.19.3",
     "tsx": "^4.20.6",
     "typescript": "~5.9.3",
-    "typescript-eslint": "^8.46.0",
-    "prettier": "^3.6.2"
+    "typescript-eslint": "^8.46.0"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^6.19.3",

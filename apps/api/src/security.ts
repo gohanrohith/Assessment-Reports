@@ -95,7 +95,10 @@ export class PermissionGuard implements CanActivate {
         if (session?.mfaVerified && user.mfaEnabled) return true;
       }
     }
-    if (identity.active_school_id && ['school:read', 'school:write'].includes(permission ?? '')) {
+    if (
+      identity.active_school_id &&
+      ['school:read', 'school:write', 'staff:manage'].includes(permission ?? '')
+    ) {
       const member = await this.db.scoped(identity.active_school_id, identity.sub, (tx) =>
         tx.membership.findFirst({
           where: { tenantId: identity.active_school_id!, userId: identity.sub, active: true },

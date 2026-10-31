@@ -38,7 +38,7 @@ Pinned Prisma 6.19.3 runs an engine-free JavaScript client and bundled WASM migr
 
 This is an explicitly enabled Prisma experimental migration adapter, pinned and tested; revalidate before upgrading. The API uses the ordinary client adapter and never the migration adapter. Prisma schema is authoritative for models; SQL migrations additionally express policies, grants and triggers that Prisma cannot model. Generation, initial migration and no-op redeployment are validated. Integration tests exercise concurrent RLS transactions, missing-context reads, cross-tenant writes and rollback recovery.
 
-The full ADR-002 go/no-go **is not signed off**: weighted grade aggregation under the future grading model and live lock/load characterization require that model and a representative pilot dataset. Do not infer these from foundational identity queries. Prisma migrations are forward-only by default; recovery uses tested transaction rollback and database restore, not an invented automatic down migration.
+The isolated BL-004A technical spike now verifies typed native groupBy aggregates over generated conditional projections, decimal arithmetic, probe RLS, DDL lock timeouts and metadata-only forward migration behavior. See `docs/prisma-validation.md` for the engineering GO result and exact limitations. These are infrastructure probes, not application grading features. Production migration lock/load characterization still requires a representative environment. Prisma migrations are forward-only by default; recovery uses tested transaction rollback and database restore, not an invented automatic down migration.
 
 ## Infrastructure boundaries
 
@@ -47,3 +47,9 @@ Local PostgreSQL is not encrypted production hosting. Production requires approv
 ## Dependency compatibility
 
 NestJS 11 is retained for CommonJS/Jest interoperability. Root overrides pin patched multer 2.5, js-yaml 5.5 and deepmerge-ts 8.0.2; the complete API, migration and browser suites run against those versions. The initial workspace lock retained old nested versions, so the lock was regenerated from a clean install and runtime audit rechecked. npm 11 can report these workspace transitive overrides as invalid against the upstream exact version pins even though it installs the override; validate the installed versions, runtime audit and clean `npm ci` rather than discarding the security fixes. Revisit on a reviewed NestJS/Prisma upgrade.
+
+## Staff access and credential lifecycle
+
+School administrators manage existing staff roles and active state through school-scoped endpoints and UI. The server checks the active-school object, locks its school row, rechecks the acting membership, rejects stale expected values and prevents self-lockout. Changes revoke only the affected user's sessions in that school and append before/after audit entries atomically. Platform operations, teachers and other roles cannot use the staff-access endpoints. New identities remain out-of-band operator provisioning; academic assignments and guardian relationships remain later domain work.
+
+Password changes verify the current password and a fresh TOTP code when enabled, then revoke every session in the same transaction as the password/audit change. User-row locking serializes login, MFA setup/confirmation and password changes, preventing stale credential verification from creating a session after a change. Confirming MFA invalidates preexisting password-only sessions. Browser requests renew stale access through a single shared in-flight refresh without reloading/discarding edited school settings; context changes in another tab require an explicit reload.
